@@ -243,12 +243,14 @@ class ExecutionGateway:
     # ── market (taker) orders — used by moneydoctor, NOT the maker strategy ──
     async def market_order(
         self, token_id: str, side: Side, amount: float, meta: MarketMeta,
-        *, fak: bool = True,
+        *, fak: bool = True, worst_price: float | None = None,
     ) -> dict[str, Any]:
         """Place a marketable order. amount = USD for BUY, shares for SELL.
 
-        This is a TAKER order (crosses the spread) — only the moneydoctor live
-        self-test uses it; the maker strategy never does.
+        This is a TAKER order (crosses the spread). Used by the moneydoctor
+        self-test and by the strategy's bounded trade-out exit (the one
+        deliberate exception to maker-only). `worst_price` caps slippage: the
+        order is marketable only down/up to that price.
         """
         if self._paper or self._client is None:
             return {"paper": True}
@@ -262,7 +264,8 @@ class ExecutionGateway:
 
             ot = OrderType.FAK if fak else OrderType.FOK
             args = MarketOrderArgsV2(token_id=token_id, amount=amount,
-                                     side=side.value, order_type=ot)
+                                     side=side.value, order_type=ot,
+                                     price=worst_price if worst_price is not None else 0)
             opts = PartialCreateOrderOptions(tick_size=_tick_str(meta.tick_size),
                                              neg_risk=meta.neg_risk)
             try:
@@ -397,16 +400,10 @@ class ExecutionGateway:
             return None
 
     async def collateral_balance(self) -> float:
-        """pUSD balance (float) on the funder."""
-        ba = await self.balance_allowance()
-        for k in ("balance", "collateral", "amount"):
-            if isinstance(ba, dict) and k in ba:
-                try:
-                    v = float(ba[k])
-                    return v / 1e6 if v > 1e6 else v
-                except (ValueError, TypeError):
-                    return 0.0
-        return 0.0
+        """pUSD balance (float) on the funder. Raises when the read failed: a
+        failed read must never look like an empty wallet (2026-10-29: one server
+        disconnect returned {} -> 0.0 -> the total-loss stop fired on a phantom)."""
+        return parse_collateral(await self.balance_allowance())
 
     # ── heartbeat (dead-man switch) ─────────────────────────────────────
     async def heartbeat(self) -> bool:
@@ -528,3 +525,12 @@ def _first(d: Any, *keys: str) -> Any:
         if k in d and d[k]:
             return d[k]
     return None
+
+
+def parse_collateral(ba: Any) -> float:
+    """Balance in pUSD from a balance/allowance snapshot; raises if absent or unparsable."""
+    for k in ("balance", "collateral", "amount"):
+        if isinstance(ba, dict) and k in ba:
+            v = float(ba[k])  # ValueError/TypeError propagate: that is a failed read
+            return v / 1e6 if v > 1e6 else v
+    raise RuntimeError(f"collateral read failed or has no balance field: {ba!r}")

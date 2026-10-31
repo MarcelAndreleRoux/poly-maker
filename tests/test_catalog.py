@@ -89,3 +89,10 @@ def test_store_upsert_is_idempotent(tmp_path):
     store.upsert_market(m)  # second time updates, not duplicates
     assert len(store.top(10)) == 1
     store.close()
+
+
+def test_parse_market_rejects_augmented_neg_risk_placeholder():
+    other = {**RAW, "conditionId": "0xother", "question": "Will another person win?",
+             "negRiskOther": True}
+    assert parse_market(other) is None
+    assert parse_market({**RAW, "negRiskOther": False}) is not None

@@ -39,6 +39,21 @@ halt_before_hours   = 2
 # --- exits ---
 exit_urgency_s      = 900
 merge_min_size      = 20.0
+# --- defenses (see README Strategy) ---
+skew_min_ticks      = 2.0     # lean >= 2 ticks at full cap even on a dead-quiet tape
+trade_out_enabled   = true    # bounded taker exit when under water; the one maker-only exception
+trade_out_drift_ticks = 10    # >= 1c under cost (fair value vs avg price) before even considering it
+trade_out_max_slip_ticks = 2  # never sell more than 2 ticks below the best bid
+trade_out_depth_frac = 0.5    # sell at most half the best-bid size per shot (never through a gap)
+trade_out_cooldown_s = 300    # one shot per 5 min per market
+exit_lean           = true    # exits priced off the leaned reservation price, not fair value
+entry_yields_to_exit = false  # (measured: costs reward scoring minutes, no PnL gain)
+event_keeps_exits   = true    # EVENT pulls entries only; never hold a bag with no exit up
+replace_below_reward_min = true  # a partial-fill remnant under the reward min stops scoring -> replace
+inventory_metric    = "at_risk" # cap = dollars lost if the position resolves against us (NO at 1-fv)
+tox_decay_halflife_s = 0      # long memory: a 30-min decay re-engaged full size after bad fills (4x worse)
+catalyst_flatten_hours = 2.0  # REDUCE_ONLY lead-in before each markets.toml catalyst window
+catalyst_keeps_exits = false  # inside a window pull EVERYTHING (true = EVENT: exits keep working)
 
 
 # romania-pm: "Next PM of Romania" — Alexandru Nazare leg. Live sample 2026-07-06:
@@ -85,3 +100,193 @@ halt_before_hours   = 2
 # --- exits ---
 exit_urgency_s      = 900
 merge_min_size      = 20.0
+# --- defenses (see README Strategy) ---
+skew_min_ticks      = 2.0     # lean >= 2 ticks at full cap even on a dead-quiet tape
+trade_out_enabled   = true    # bounded taker exit when under water; the one maker-only exception
+trade_out_drift_ticks = 10    # >= 1c under cost (fair value vs avg price) before even considering it
+trade_out_max_slip_ticks = 2  # never sell more than 2 ticks below the best bid
+trade_out_depth_frac = 0.5    # sell at most half the best-bid size per shot (never through a gap)
+trade_out_cooldown_s = 300    # one shot per 5 min per market
+exit_lean           = true    # exits priced off the leaned reservation price, not fair value
+entry_yields_to_exit = false  # (measured: costs reward scoring minutes, no PnL gain)
+event_keeps_exits   = true    # EVENT pulls entries only; never hold a bag with no exit up
+replace_below_reward_min = true  # a partial-fill remnant under the reward min stops scoring -> replace
+inventory_metric    = "at_risk" # cap = dollars lost if the position resolves against us (NO at 1-fv)
+tox_decay_halflife_s = 0      # long memory: a 30-min decay re-engaged full size after bad fills (4x worse)
+catalyst_flatten_hours = 2.0  # REDUCE_ONLY lead-in before each markets.toml catalyst window
+catalyst_keeps_exits = false  # inside a window pull EVERYTHING (true = EVENT: exits keep working)
+
+
+# hundred: Newsom sized for a 100 USD deposit. 75 shares per side (backtested
+# 2026-10-27 with --bankroll 100: ~98% of minutes scoring, trading ~0, drawdown ~1 USD).
+[profiles.hundred]
+# --- fair value ---
+micro_levels        = 3
+flow_ewma_halflife_s = 120
+# --- spread / skew ---
+gamma               = 0.6     # inventory skew; sized so full cap leans ~1-2 ticks
+delta_min_ticks     = 2       # half-spread floor = 2 ticks (market spread is 2)
+c_vol               = 1.5
+c_tox               = 3.0
+# --- vol horizons ---
+vol_short_halflife_s = 10
+vol_long_halflife_s  = 900
+# --- sizing / inventory ($50 orders, $200 net max position) ---
+base_size_usdc      = 12.0    # only the sweep-detector size proxy; entries are sized in shares:
+base_size_shares    = 75.0    # 75 YES + 75 NO shares = ~75 USD resting on a 100 USD deposit, 25 USD headroom
+q_max_usdc          = 65.0    # one 75-share NO fill (~62 USD at risk) = cap -> work the exit
+q_soft_frac         = 0.6     # stop adding at net $120, exits get urgent
+layers              = 1       # one order per side
+reward_size_mult    = 1.0     # sizes already sit above the 50-share reward min
+layer_step_ticks    = 2
+# --- placement / churn ---
+reprice_ticks       = 2       # ignore 1-tick FV flicker (hold queue position)
+resize_frac         = 0.2
+min_edge_ticks      = 1       # never bid above FV - 1 tick
+# --- regime (damped for a quiet tape: one 250-share print must not flap us) ---
+event_cooloff_s     = 30      # shorter: this is a deep, slow market
+event_jump_ticks    = 6       # 0.006 = ~3% jump -> pull quotes
+event_sweep_mult    = 6.0     # print must be >=6 order-sizes
+event_sweep_frac    = 1.0     # AND consume ~all near-touch depth to count as a sweep
+trend_flow_z        = 1.8
+fv_band_min         = 0.10    # no NEW entries outside this fair-value band (REDUCE_ONLY; exits keep working)
+fv_band_max         = 0.90
+# --- lifecycle (resolves 2028 — irrelevant here) ---
+end_date_taper_days = 7
+reduce_only_hours   = 24
+halt_before_hours   = 2
+# --- exits ---
+exit_urgency_s      = 900
+merge_min_size      = 20.0
+# --- defenses (see README Strategy) ---
+skew_min_ticks      = 2.0     # lean >= 2 ticks at full cap even on a dead-quiet tape
+trade_out_enabled   = true    # bounded taker exit when under water; the one maker-only exception
+trade_out_drift_ticks = 10    # >= 1c under cost (fair value vs avg price) before even considering it
+trade_out_max_slip_ticks = 2  # never sell more than 2 ticks below the best bid
+trade_out_depth_frac = 0.5    # sell at most half the best-bid size per shot (never through a gap)
+trade_out_cooldown_s = 300    # one shot per 5 min per market
+exit_lean           = true    # exits priced off the leaned reservation price, not fair value
+entry_yields_to_exit = false  # (measured: costs reward scoring minutes, no PnL gain)
+event_keeps_exits   = true    # EVENT pulls entries only; never hold a bag with no exit up
+replace_below_reward_min = true  # a partial-fill remnant under the reward min stops scoring -> replace
+inventory_metric    = "at_risk" # cap = dollars lost if the position resolves against us (NO at 1-fv)
+tox_decay_halflife_s = 0      # long memory: a 30-min decay re-engaged full size after bad fills (4x worse)
+catalyst_flatten_hours = 2.0  # REDUCE_ONLY lead-in before each markets.toml catalyst window
+catalyst_keeps_exits = false  # inside a window pull EVERYTHING (true = EVENT: exits keep working)
+
+
+# fifty: the floor for Newsom. Both sides must rest >= 50 shares to score rewards;
+# 50 YES + 50 NO shares = ~50 USD, so DEPOSIT 55: with exactly 50 the first small
+# trading loss leaves the NO bid unfunded and scoring stops (backtested).
+[profiles.fifty]
+# --- fair value ---
+micro_levels        = 3
+flow_ewma_halflife_s = 120
+# --- spread / skew ---
+gamma               = 0.6     # inventory skew; sized so full cap leans ~1-2 ticks
+delta_min_ticks     = 2       # half-spread floor = 2 ticks (market spread is 2)
+c_vol               = 1.5
+c_tox               = 3.0
+# --- vol horizons ---
+vol_short_halflife_s = 10
+vol_long_halflife_s  = 900
+# --- sizing / inventory ($50 orders, $200 net max position) ---
+base_size_usdc      = 8.0     # only the sweep-detector size proxy; entries are sized in shares:
+base_size_shares    = 50.0    # 50 YES + 50 NO shares = the reward min on both sides, < 50 USD resting
+q_max_usdc          = 42.0   # one 50-share NO fill (~42 USD at risk) = cap -> work the exit
+q_soft_frac         = 0.6     # stop adding at net $120, exits get urgent
+layers              = 1       # one order per side
+reward_size_mult    = 1.0     # exactly the 50-share reward min: 50 YES + 50 NO shares = 50 USD resting
+layer_step_ticks    = 2
+# --- placement / churn ---
+reprice_ticks       = 2       # ignore 1-tick FV flicker (hold queue position)
+resize_frac         = 0.2
+min_edge_ticks      = 1       # never bid above FV - 1 tick
+# --- regime (damped for a quiet tape: one 250-share print must not flap us) ---
+event_cooloff_s     = 30      # shorter: this is a deep, slow market
+event_jump_ticks    = 6       # 0.006 = ~3% jump -> pull quotes
+event_sweep_mult    = 6.0     # print must be >=6 order-sizes
+event_sweep_frac    = 1.0     # AND consume ~all near-touch depth to count as a sweep
+trend_flow_z        = 1.8
+fv_band_min         = 0.10    # no NEW entries outside this fair-value band (REDUCE_ONLY; exits keep working)
+fv_band_max         = 0.90
+# --- lifecycle (resolves 2028 — irrelevant here) ---
+end_date_taper_days = 7
+reduce_only_hours   = 24
+halt_before_hours   = 2
+# --- exits ---
+exit_urgency_s      = 900
+merge_min_size      = 20.0
+# --- defenses (see README Strategy) ---
+skew_min_ticks      = 2.0     # lean >= 2 ticks at full cap even on a dead-quiet tape
+trade_out_enabled   = true    # bounded taker exit when under water; the one maker-only exception
+trade_out_drift_ticks = 10    # >= 1c under cost (fair value vs avg price) before even considering it
+trade_out_max_slip_ticks = 2  # never sell more than 2 ticks below the best bid
+trade_out_depth_frac = 0.5    # sell at most half the best-bid size per shot (never through a gap)
+trade_out_cooldown_s = 300    # one shot per 5 min per market
+exit_lean           = true    # exits priced off the leaned reservation price, not fair value
+entry_yields_to_exit = false  # (measured: costs reward scoring minutes, no PnL gain)
+event_keeps_exits   = true    # EVENT pulls entries only; never hold a bag with no exit up
+replace_below_reward_min = true  # a partial-fill remnant under the reward min stops scoring -> replace
+inventory_metric    = "at_risk" # cap = dollars lost if the position resolves against us (NO at 1-fv)
+tox_decay_halflife_s = 0      # long memory: a 30-min decay re-engaged full size after bad fills (4x worse)
+catalyst_flatten_hours = 2.0  # REDUCE_ONLY lead-in before each markets.toml catalyst window
+catalyst_keeps_exits = false  # inside a window pull EVERYTHING (true = EVENT: exits keep working)
+
+[profiles.delcy100]
+# Delcy Rodriguez / Venezuela leader 2026 at ~129 USD collateral (2026-10-29). Copy of `fifty`
+# with 100 shares per side (pool 117 USD/day, reward min 50, max spread 4.5c, mid ~0.14) and a
+# 6 h toxicity decay. 100 d on-chain backtest: 11 fills, -5.00 trading, scored 89%, worst day -1.5.
+# --- fair value ---
+micro_levels        = 3
+flow_ewma_halflife_s = 120
+# --- spread / skew ---
+gamma               = 0.6     # inventory skew; sized so full cap leans ~1-2 ticks
+delta_min_ticks     = 2       # half-spread floor = 2 ticks (market spread is 2)
+c_vol               = 1.5
+c_tox               = 3.0
+# --- vol horizons ---
+vol_short_halflife_s = 10
+vol_long_halflife_s  = 900
+# --- sizing / inventory ($50 orders, $200 net max position) ---
+base_size_usdc      = 16.0    # fallback only; base_size_shares wins
+base_size_shares    = 100.0    # 2x the 50-share reward min on both sides (~100 USD resting at 129 USD collateral)
+q_max_usdc          = 85.0    # one 100-share NO fill at ~0.86 = cap -> work the exit
+q_soft_frac         = 0.6     # stop adding at net $120, exits get urgent
+layers              = 1       # one order per side
+reward_size_mult    = 1.0     # exactly the 50-share reward min: 50 YES + 50 NO shares = 50 USD resting
+layer_step_ticks    = 2
+# --- placement / churn ---
+reprice_ticks       = 2       # ignore 1-tick FV flicker (hold queue position)
+resize_frac         = 0.2
+min_edge_ticks      = 1       # never bid above FV - 1 tick
+# --- regime (damped for a quiet tape: one 250-share print must not flap us) ---
+event_cooloff_s     = 30      # shorter: this is a deep, slow market
+event_jump_ticks    = 6       # 0.006 = ~3% jump -> pull quotes
+event_sweep_mult    = 6.0     # print must be >=6 order-sizes
+event_sweep_frac    = 1.0     # AND consume ~all near-touch depth to count as a sweep
+trend_flow_z        = 1.8
+fv_band_min         = 0.10    # no NEW entries outside this fair-value band (REDUCE_ONLY; exits keep working)
+fv_band_max         = 0.90
+# --- lifecycle (resolves 2028 — irrelevant here) ---
+end_date_taper_days = 7
+reduce_only_hours   = 24
+halt_before_hours   = 2
+# --- exits ---
+exit_urgency_s      = 900
+merge_min_size      = 20.0
+# --- defenses (see README Strategy) ---
+skew_min_ticks      = 2.0     # lean >= 2 ticks at full cap even on a dead-quiet tape
+trade_out_enabled   = true    # bounded taker exit when under water; the one maker-only exception
+trade_out_drift_ticks = 10    # >= 1c under cost (fair value vs avg price) before even considering it
+trade_out_max_slip_ticks = 2  # never sell more than 2 ticks below the best bid
+trade_out_depth_frac = 0.5    # sell at most half the best-bid size per shot (never through a gap)
+trade_out_cooldown_s = 300    # one shot per 5 min per market
+exit_lean           = true    # exits priced off the leaned reservation price, not fair value
+entry_yields_to_exit = false  # (measured: costs reward scoring minutes, no PnL gain)
+event_keeps_exits   = true    # EVENT pulls entries only; never hold a bag with no exit up
+replace_below_reward_min = true  # a partial-fill remnant under the reward min stops scoring -> replace
+inventory_metric    = "at_risk" # cap = dollars lost if the position resolves against us (NO at 1-fv)
+tox_decay_halflife_s = 21600    # 6 h decay. 0 (= permanent memory) pinned quotes at the reward-band edge where the score is 0: Delcy 100 d backtest scored 42% -> 89%, pnl -3 -> -5
+catalyst_flatten_hours = 2.0  # REDUCE_ONLY lead-in before each markets.toml catalyst window
+catalyst_keeps_exits = false  # inside a window pull EVERYTHING (true = EVENT: exits keep working)

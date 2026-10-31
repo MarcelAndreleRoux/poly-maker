@@ -55,6 +55,18 @@ def normalize_trade(
     addr = our_address.lower()
 
     out: list[TradeEvent] = []
+    if str(msg.get("trader_side", "")).upper() == "TAKER":
+        # our own taker order (a bounded trade-out): the top-level fields are
+        # ours; maker_orders are the counterparties
+        try:
+            size = float(msg.get("size", 0))
+            price = float(msg.get("price", 0))
+        except (ValueError, TypeError):
+            return []
+        if size <= 0:
+            return []
+        return [TradeEvent(token_id=taker_asset, our_side=taker_side, price=price, size=size,
+                           trade_id=trade_id, status=status, ts=ts)]
     for i, mo in enumerate(msg.get("maker_orders", []) or []):
         if str(mo.get("maker_address", "")).lower() != addr:
             continue

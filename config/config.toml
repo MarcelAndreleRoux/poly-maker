@@ -31,10 +31,12 @@ journal = true                  # append raw WS/orders to journal/ for backtest
 loop = "uvloop"                 # "uvloop" | "asyncio"
 
 [risk]
-max_total_exposure_usdc = 450.0     # sum of |position notional| + open buy notional
-max_event_group_loss_usdc = 400.0   # neg-risk group worst-case loss cap
-max_market_notional_usdc = 400.0     # per-market position+orders notional cap
-daily_loss_kill_usdc = 40.0         # realized daily loss -> halt new quotes
+max_total_exposure_usdc = 125.0  # deposit 129 pUSD on 2026-10-29 minus margin (also the paper engine's stand-in collateral)
+max_event_group_loss_usdc = 90.0  # 100 NO shares at ~0.86 = 86 worst case; q_max 85 is the real cap
+max_market_notional_usdc = 125.0  # single market
+daily_loss_kill_usdc = 5.0          # realized daily loss -> halt new quotes (10% of bankroll; backtest worst day was -0.5)
+total_loss_kill_usdc = 40.0         # 2026-10-29 user's hard stop: equity (collateral + inventory at FV) 40 below start -> HALTED everywhere, kill.json written, stays halted across restarts
+start_equity_usdc = 129.0           # deposit at go-live (doctor: ≈129.04 pUSD on 2026-10-29)
 ws_stale_halt_s = 10.0               # no book updates for this long -> halt market
 user_ws_blind_halt_s = 15.0          # user WS down this long -> pull all quotes (can't see fills)
 heartbeat_halt_failures = 3          # consecutive heartbeat misses -> halt + resync

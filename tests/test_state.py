@@ -169,3 +169,12 @@ def test_reconcile_matches_layers_one_to_one():
     assert plan.to_cancel == []
     assert len(plan.to_place) == 1  # only the missing deeper layer
     assert plan.to_place[0].price == 0.47
+
+
+def test_reconcile_replaces_remnant_below_reward_min():
+    tq = TargetQuotes("cid", Regime.QUIET, (Quote("tok", Side.BUY, 0.49, 50),))
+    live = [_live("o1", "tok", Side.BUY, 0.49, 35)]  # 30% smaller, inside a 0.6 tolerance
+    keep = reconcile(tq, live, tick=0.01, reprice_ticks=2, resize_frac=0.6)
+    assert keep.is_noop
+    replace = reconcile(tq, live, tick=0.01, reprice_ticks=2, resize_frac=0.6, min_live_size=50)
+    assert replace.to_cancel == ["o1"] and len(replace.to_place) == 1

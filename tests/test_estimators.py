@@ -81,3 +81,19 @@ def test_markout_benign_fills_are_not_toxic():
     mt.evaluate(fv_now=0.55, ts=31.0)
     assert mt.markout > 0
     assert mt.toxicity == 0.0
+
+
+def test_toxicity_ages_out_between_fills():
+    mt = MarkoutTracker(horizon_s=30.0, ewma_halflife_s=100.0, decay_halflife_s=100.0)
+    mt.record_fill(Side.BUY, fv_at_fill=0.50, ts=0.0)
+    mt.evaluate(fv_now=0.45, ts=31.0)
+    t0 = mt.toxicity
+    assert t0 > 0
+    mt.evaluate(fv_now=0.45, ts=131.0)  # one half-life later, no new fills
+    assert abs(mt.toxicity - t0 / 2) < 1e-9
+    frozen = MarkoutTracker(horizon_s=30.0, ewma_halflife_s=100.0)  # default: long memory
+    frozen.record_fill(Side.BUY, fv_at_fill=0.50, ts=0.0)
+    frozen.evaluate(fv_now=0.45, ts=31.0)
+    f0 = frozen.toxicity
+    frozen.evaluate(fv_now=0.45, ts=10_000.0)
+    assert frozen.toxicity == f0  # never decays without an explicit half-life

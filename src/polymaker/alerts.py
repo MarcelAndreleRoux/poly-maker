@@ -25,6 +25,7 @@ class Alerter:
         self._min_interval = min_interval_s
         self._proxy = proxy
         self._last_sent: dict[str, float] = {}  # key -> ts (dedupe/rate-limit)
+        self._last_logged: dict[str, float] = {}
 
     @property
     def enabled(self) -> bool:
@@ -37,10 +38,12 @@ class Alerter:
         webhook at most once per `min_interval_s` per key (critical bypasses the
         limit). Safe to call from sync code — schedules the POST on the loop.
         """
-        (log.critical if critical else log.warning)("alert", key=key, msg=message)
+        now = time.time()
+        if now - self._last_logged.get(key, 0.0) >= self._min_interval:
+            (log.critical if critical else log.warning)("alert", key=key, msg=message)
+            self._last_logged[key] = now
         if not self._url:
             return
-        now = time.time()
         if not critical and now - self._last_sent.get(key, 0.0) < self._min_interval:
             return
         self._last_sent[key] = now

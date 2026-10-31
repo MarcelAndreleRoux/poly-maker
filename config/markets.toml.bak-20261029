@@ -1,0 +1,30 @@
+# Trade list (supervised MM session).
+#
+# Catalyst calendar: pull quotes BEFORE known news, not after the first print.
+# Inside a window the market is HALTED (or EVENT = exits only, if the profile sets
+# catalyst_keeps_exits); for `flatten_hours` before it (default: the profile's
+# catalyst_flatten_hours) it is REDUCE_ONLY so any bag is worked down first.
+# Times are UTC (naive values are read as UTC). Per-market:
+#
+#   [[markets]]
+#   slug = "..."
+#   profile = "..."
+#     [[markets.catalysts]]
+#     start = 2026-11-03T23:00:00Z
+#     end   = 2026-11-04T12:00:00Z
+#     note  = "election night"
+#     flatten_hours = 4.0            # optional override of the profile lead-in
+#
+# Global windows (apply to every market) go at the top level:
+#
+#   [[catalysts]]
+#   start = 2026-11-03T23:00:00Z
+#   end   = 2026-11-04T12:00:00Z
+#   note  = "election night"
+#
+# Read at startup (restart the engine after editing).
+[[markets]]
+slug    = "will-gavin-newsom-win-the-2028-democratic-presidential-nomination-568"
+profile = "fifty"
+enabled = true
+

@@ -144,12 +144,20 @@ class MarkoutTracker:
     which the quoter turns into extra spread / less size.
     """
 
-    __slots__ = ("_horizon_s", "_pending", "_markout")
+    __slots__ = ("_horizon_s", "_pending", "_markout", "_decay_halflife_s", "_age_ts")
 
-    def __init__(self, horizon_s: float = 300.0, ewma_halflife_s: float = 1800.0) -> None:
+    def __init__(
+        self, horizon_s: float = 300.0, ewma_halflife_s: float = 1800.0,
+        decay_halflife_s: float | None = None,
+    ) -> None:
         self._horizon_s = horizon_s
         self._pending: list[_PendingMarkout] = []
         self._markout = Ewma(ewma_halflife_s)
+        # toxicity ages toward 0 between fills (half-life); None = never, i.e. a
+        # bad fill keeps the quoter defensive until the next resolved markout
+        # (long memory; measured to be the better default on political tapes)
+        self._decay_halflife_s = decay_halflife_s
+        self._age_ts = 0.0
 
     def record_fill(self, side: Side, fv_at_fill: float, ts: float) -> None:
         self._pending.append(_PendingMarkout(fv_at_fill, side, ts + self._horizon_s))
@@ -166,6 +174,7 @@ class MarkoutTracker:
             else:
                 still.append(p)
         self._pending = still
+        self._age_ts = max(self._age_ts, ts)
 
     @property
     def markout(self) -> float:
@@ -173,8 +182,13 @@ class MarkoutTracker:
 
     @property
     def toxicity(self) -> float:
-        """Non-negative adverse-selection score (0 when fills are benign)."""
-        return max(0.0, -self._markout.value)
+        """Non-negative adverse-selection score (0 when fills are benign), aged
+        toward 0 since the last resolved markout when decay is enabled."""
+        raw = max(0.0, -self._markout.value)
+        if raw <= 0.0 or self._decay_halflife_s is None:
+            return raw
+        dt = max(0.0, self._age_ts - self._markout._last_ts)
+        return raw * 0.5 ** (dt / self._decay_halflife_s)
 
 
 @dataclass(slots=True)

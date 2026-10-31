@@ -33,9 +33,14 @@ def reconcile(
     tick: float,
     reprice_ticks: int,
     resize_frac: float,
+    min_live_size: float = 0.0,
 ) -> ReconcilePlan:
     """Diff targets against live orders. Keep live orders that already satisfy a
-    target within tolerance; cancel the rest; place targets with no match."""
+    target within tolerance; cancel the rest; place targets with no match.
+
+    `min_live_size` (the reward program's per-order minimum): a partially-filled
+    remnant below it has stopped scoring, so it never counts as a match for a
+    target that is itself at scoring size, even inside `resize_frac`."""
     live_by_key: dict[tuple[str, str], list[OpenOrder]] = defaultdict(list)
     for o in live:
         live_by_key[(o.token_id, o.side.value)].append(o)
@@ -50,6 +55,8 @@ def reconcile(
         for o in candidates:
             if o.order_id in keep:
                 continue
+            if min_live_size > 0 and q.size >= min_live_size and o.size + _EPS < min_live_size:
+                continue  # remnant no longer scores -> replace it
             price_close = abs(o.price - q.price) <= price_tol
             size_close = q.size <= 0 or abs(o.size - q.size) <= resize_frac * q.size + _EPS
             if price_close and size_close:

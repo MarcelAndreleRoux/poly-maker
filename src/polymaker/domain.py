@@ -174,12 +174,26 @@ class Quote:
 
 
 @dataclass(frozen=True, slots=True)
+class TradeOut:
+    """A bounded TAKER exit the strategy asks for: sell `size` shares of
+    `token_id` with a marketable FAK order no worse than `worst_price`. Sized to
+    the near-touch depth only (never through a gap); the engine enforces a
+    cooldown. The one deliberate exception to the maker-only mandate."""
+
+    token_id: str
+    size: float
+    worst_price: float
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class TargetQuotes:
     """The full desired resting-order set for a market at a point in time."""
 
     condition_id: str
     regime: Regime
     quotes: tuple[Quote, ...] = ()
+    trade_outs: tuple[TradeOut, ...] = ()
 
     @property
     def is_empty(self) -> bool:

@@ -124,6 +124,10 @@ def parse_market(raw: dict[str, Any], reward_rates: dict[str, float] | None = No
     try:
         if not raw.get("acceptingOrders", False):
             return None
+        if raw.get("negRiskOther"):
+            # augmented neg-risk placeholder ("Will another person win?"): its
+            # outcome set evolves over time and Polymarket says not to trade it
+            return None
         token_ids = _json_list(raw.get("clobTokenIds"))
         outcomes = _json_list(raw.get("outcomes"))
         if len(token_ids) != 2 or len(outcomes) != 2:

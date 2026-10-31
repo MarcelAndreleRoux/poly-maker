@@ -75,3 +75,29 @@ async def test_recompute_skips_when_book_empty(tmp_path, meta):
     assert len(eng.state.orders) == 0
     eng.state.close()
     eng.catalog.close()
+
+
+async def test_unfundable_entries_are_not_placed(tmp_path, meta):
+    """Default profile rests ~25 USD per layer (2 layers x 2 sides) at 0.49. With
+    30 USD of collateral only the first BUY fits; unknown collateral = no filter."""
+    eng = _engine_with_market(tmp_path, meta)
+    _feed_book(eng, meta)
+    eng._collateral = 30.0
+    await eng._recompute(meta.condition_id)
+    buys = [o for t in (meta.yes.token_id, meta.no.token_id)
+            for o in eng.state.orders_for(t) if o.side is Side.BUY]
+    assert len(buys) == 1
+    assert sum(o.price * o.size for o in buys) <= 30.0 * 0.995
+    eng.state.close()
+    eng.catalog.close()
+
+    (tmp_path / "b").mkdir()
+    eng2 = _engine_with_market(tmp_path / "b", meta)
+    _feed_book(eng2, meta)
+    eng2._collateral = None
+    await eng2._recompute(meta.condition_id)
+    buys2 = [o for t in (meta.yes.token_id, meta.no.token_id)
+             for o in eng2.state.orders_for(t) if o.side is Side.BUY]
+    assert len(buys2) == 4
+    eng2.state.close()
+    eng2.catalog.close()

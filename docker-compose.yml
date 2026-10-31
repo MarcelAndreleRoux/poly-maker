@@ -1,0 +1,77 @@
+# polymaker in Docker.
+#
+#   docker compose --profile cli build           # build the image (once; paper/live reuse it)
+#   docker compose run --rm cli scan             # one-off CLI (scan, markets, doctor, status, pnl, cancel-all ...)
+#   docker compose run --rm cli markets-add <slug> --profile <name>
+#   docker compose --profile paper up -d         # paper engine in the background (no orders posted)
+#   docker compose --profile live  up -d         # LIVE engine in the background (real money)
+#   docker compose logs -f live                  # follow the structured log
+#   docker compose --profile live down           # SIGINT -> engine.shutdown() -> cancel_all
+#
+# Layout on the host (all on the NVMe, all gitignored except config/):
+#   ./config      -> /data/config   wallet/engine/risk + strategy profiles + trade list
+#   ./livecfg     -> /data/livecfg  the conservative live-test config (use --config-dir livecfg)
+#   ./data/live   -> /data          state.db, journal/, logs/, markets.csv for live + cli
+#   ./data/paper  -> /data          same, isolated, for the paper engine
+# Secrets come from ./.env (PK, BROWSER_ADDRESS, ...) via env_file; never baked into the image.
+#
+# Run exactly ONE live engine per wallet. `container_name` enforces that for this compose file.
+
+x-base: &base
+  image: polymaker:local
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    PYTHONUNBUFFERED: "1"
+    TZ: UTC
+  init: true
+  stop_signal: SIGINT          # KeyboardInterrupt -> clean shutdown (cancels all resting orders)
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+x-live-volumes: &live-volumes
+  - ./data/live:/data
+  - ./config:/data/config
+  - ./livecfg:/data/livecfg
+
+services:
+  # one-off commands against the live state dir
+  cli:
+    <<: *base
+    build: .
+    profiles: ["cli"]
+    volumes: *live-volumes
+
+  paper:
+    <<: *base
+    container_name: polymaker-paper
+    profiles: ["paper"]
+    command: ["run", "--paper"]
+    restart: unless-stopped
+    volumes:
+      - ./data/paper:/data
+      - ./config:/data/config
+      - ./livecfg:/data/livecfg
+
+  live:
+    <<: *base
+    container_name: polymaker-live
+    profiles: ["live"]
+    command: ["run"]
+    restart: unless-stopped
+    volumes: *live-volumes
+
+  # hourly snapshot of Polymarket's own reward accounting (earning_percentage per
+  # market) -> /data/rewards.jsonl. Read-only against the API; no orders.
+  rewards:
+    <<: *base
+    container_name: polymaker-rewards
+    profiles: ["live"]
+    command: ["rewards", "--loop", "3600", "--days", "2"]
+    restart: unless-stopped
+    volumes: *live-volumes

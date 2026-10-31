@@ -86,3 +86,20 @@ def test_normalize_order_remaining_and_cancel():
         "original_size": "100", "size_matched": "0", "status": "CANCELED", "id": "o1",
     })
     assert cancel is not None and cancel.is_cancel is True
+
+
+def test_our_taker_fill_is_recognised():
+    """A bounded trade-out is OUR taker order: top-level fields are ours."""
+    msg = {
+        "event_type": "trade", "id": "t9", "status": "MATCHED", "timestamp": "1700000000",
+        "asset_id": "yes-token", "side": "SELL", "size": "30", "price": "0.48", "outcome": "Yes",
+        "trader_side": "TAKER",
+        "maker_orders": [
+            {"maker_address": "0xSomeoneElse", "matched_amount": "30", "price": "0.48", "outcome": "Yes"}
+        ],
+    }
+    evs = normalize_trade(msg, OUR, lambda t: "no-token")
+    assert len(evs) == 1
+    ev = evs[0]
+    assert ev.token_id == "yes-token" and ev.our_side is Side.SELL
+    assert ev.size == 30.0 and ev.price == 0.48 and ev.trade_id == "t9"

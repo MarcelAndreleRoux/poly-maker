@@ -14,13 +14,14 @@ import asyncio
 import contextlib
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from polymaker.alerts import Alerter
 from polymaker.catalog.gamma import GammaClient, fetch_reward_rates, parse_market
 from polymaker.catalog.store import CatalogStore
-from polymaker.config import Config, StrategyProfile
-from polymaker.domain import Fill, MarketMeta, Regime, Side
+from polymaker.config import CatalystWindow, Config, StrategyProfile
+from polymaker.domain import Fill, MarketMeta, Quote, Regime, Side
 from polymaker.execution.gateway import ExecutionGateway
 from polymaker.execution.reconciler import reconcile
 from polymaker.journal import Journal
@@ -28,7 +29,7 @@ from polymaker.logging import get_logger
 from polymaker.marketdata.parse import TradePrint
 from polymaker.marketdata.service import MarketDataService
 from polymaker.merge import Merger
-from polymaker.risk.manager import RiskManager
+from polymaker.risk.manager import KillFile, RiskManager
 from polymaker.state.store import StateStore
 from polymaker.state.tracker import UserEventProcessor
 from polymaker.strategy.estimators import (
@@ -37,8 +38,14 @@ from polymaker.strategy.estimators import (
     MarkoutTracker,
     VolEstimator,
 )
-from polymaker.strategy.quoting import QuoteInputs, compute_fair_value, construct_quotes
-from polymaker.strategy.regime import RegimeInputs, RegimeMachine
+from polymaker.strategy.quoting import (
+    QuoteInputs,
+    compute_fair_value,
+    construct_quotes,
+    fit_entries_to_collateral,
+    inventory_util,
+)
+from polymaker.strategy.regime import RegimeInputs, RegimeMachine, catalyst_state
 from polymaker.userstream.client import UserStream
 
 log = get_logger("engine")
@@ -76,7 +83,16 @@ class Engine:
         self._token_cid: dict[str, str] = {}
         self._locks: dict[str, asyncio.Lock] = {}  # per-market: serialize recompute vs reconcile
         self._halted: set[str] = set()  # markets closed/resolved/not-accepting
-        self._last_quote_fv: dict[str, float] = {}  # requote suppression
+        self._pos_open_ts: dict[str, float] = {}  # token -> when the current position opened
+        self.catalysts: dict[str, list[CatalystWindow]] = {}  # cid -> scheduled windows
+        self._catalyst_last: dict[str, tuple[bool, bool]] = {}  # cid -> (active, flatten) logged
+        self._last_trade_out: dict[str, float] = {}  # token -> last taker exit ts (cooldown)
+        # pUSD collateral on the funder (live: read at startup + every reconcile,
+        # adjusted on fills; paper: the exposure cap stands in for a bankroll).
+        # BUY quotes it cannot cover are never sent: the exchange would reject
+        # them and one rejection quarantines the whole market.
+        self._collateral: float | None = cfg.risk.max_total_exposure_usdc if paper else None
+        self._killfile = KillFile(Path(cfg.paths.db).with_name("kill.json"))
         # supervised tasks: name -> (factory, task) so a dead task restarts
         self._task_specs: dict[str, Any] = {}
         self._tasks: dict[str, asyncio.Task[Any]] = {}
@@ -188,6 +204,7 @@ class Engine:
                     continue
                 self.metas[meta.condition_id] = meta
                 self.profiles[meta.condition_id] = self.cfg.profile_for(entry)
+                self.catalysts[meta.condition_id] = self.cfg.catalysts_for(entry)
                 self.est[meta.condition_id] = self._make_estimators(self.profiles[meta.condition_id])
                 self.regime_m[meta.condition_id] = RegimeMachine()
                 self._dirty[meta.condition_id] = asyncio.Event()
@@ -217,7 +234,8 @@ class Engine:
         return MarketEstimators(
             vol=VolEstimator(p.vol_short_halflife_s, p.vol_long_halflife_s),
             flow=FlowEstimator(p.flow_ewma_halflife_s),
-            markout=MarkoutTracker(),
+            markout=MarkoutTracker(
+                decay_halflife_s=p.tox_decay_halflife_s if p.tox_decay_halflife_s > 0 else None),
         )
 
     async def _startup_reconcile(self) -> None:
@@ -247,6 +265,67 @@ class Engine:
         if positions:
             self.state.reconcile_positions(positions)
             log.info("startup_positions", n=len(positions))
+        await self._refresh_collateral()
+        self._arm_total_loss_stop()
+
+    async def _refresh_collateral(self) -> None:
+        """Live only: re-read the funder's pUSD balance (paper keeps its stand-in)."""
+        if self.paper:
+            return
+        try:
+            bal = await self.gateway.collateral_balance()
+        except Exception as exc:  # noqa: BLE001 - keep the last known value
+            log.warning("collateral_refresh_failed", err=str(exc))
+            return
+        if self._collateral is None or abs(bal - self._collateral) > 0.01:
+            log.info("collateral", pusd=round(bal, 2))
+            self.journal.write("collateral", {"pusd": bal}, time.time())
+        self._collateral = bal
+        self._check_total_loss()
+
+    def _real_equity(self) -> float | None:
+        """Funder collateral + inventory at fair value (paper: the stand-in)."""
+        if self._collateral is None:
+            return None
+        return self._collateral + self.risk.inventory_value
+
+    def _arm_total_loss_stop(self) -> None:
+        """Startup: a kill file left by an earlier run keeps every market halted."""
+        info = self._killfile.read()
+        if info:
+            self.risk.kill(f"kill_file: {info.get('reason', '')}")
+            log.critical("kill_file_present", path=str(self._killfile.path), **info)
+            self.alerter.alert("kill_file", f"kill file present, engine halted: {info}",
+                               critical=True)
+            return
+        self._check_total_loss()
+
+    def _check_total_loss(self) -> None:
+        eq = self._real_equity()
+        if eq is None:
+            return
+        reason = self.risk.check_total_loss(eq)
+        if reason and not self._killfile.exists():
+            self._killfile.write(reason, eq)
+            log.critical("total_loss_stop", equity=round(eq, 2), reason=reason,
+                         kill_file=str(self._killfile.path))
+            self.alerter.alert("total_loss", f"TOTAL LOSS STOP: {reason}", critical=True)
+            for cid in self.metas:
+                self._dirty[cid].set()  # requote now -> HALTED pulls every order
+
+    def _fundable(self, quotes: list[Quote], cid: str) -> list[Quote]:
+        """Drop BUY quotes the collateral cannot cover once every resting BUY
+        (all markets) is counted. Unknown collateral = no filtering (old behaviour)."""
+        if self._collateral is None:
+            return quotes
+        open_buys = sum(o.price * o.size for tok in self._token_cid
+                        for o in self.state.orders_for(tok) if o.side is Side.BUY)
+        available = self._collateral * 0.995 - open_buys  # 0.5% margin for rounding
+        kept, dropped = fit_entries_to_collateral(quotes, available)
+        if dropped:
+            log.info("unfunded_entries", cid=cid[:8], dropped=len(dropped),
+                     available=round(available, 2), collateral=round(self._collateral, 2))
+        return kept
 
     def _only_traded(self, positions: dict[str, tuple[float, float]]) -> dict[str, tuple[float, float]]:
         """Scope account positions to tokens WE trade. Manual/UI positions in
@@ -280,7 +359,9 @@ class Engine:
         if cid is None:
             return
         p = self.profiles[cid]
-        self.est[cid].flow.update(tp.aggressor, tp.size, tp.ts)
+        # the flow EWMA lives in YES space: a taker BUY of NO is a SELL of YES
+        aggressor = tp.aggressor if tp.asset_id == self.metas[cid].yes.token_id else tp.aggressor.opposite
+        self.est[cid].flow.update(aggressor, tp.size, tp.ts)
         # A trade only flags a SWEEP (-> pull quotes) if it's genuinely toxic:
         # large in absolute terms AND large relative to the resting depth it
         # consumed (i.e. it actually ate through the book). A big trade absorbed
@@ -306,13 +387,26 @@ class Engine:
 
     def _on_fill(self, fill: Fill) -> None:
         self.risk.note_fill(fill)
+        if self._collateral is not None:  # a BUY spends collateral, a SELL returns it
+            notional = fill.price * fill.size
+            self._collateral += notional if fill.side is Side.SELL else -notional
+        self._check_total_loss()
         cid = self._token_cid.get(fill.token_id)
         if cid is None:
             return
         est = self.est[cid]
-        fv = est.last_fv if est.last_fv is not None else fill.price
-        token_fv = fv if fill.token_id == self.metas[cid].yes.token_id else (1.0 - fv)
-        est.markout.record_fill(fill.side, token_fv, fill.ts)
+        meta = self.metas[cid]
+        is_yes = fill.token_id == meta.yes.token_id
+        # the tracker resolves markouts against YES fair value, so record the
+        # fill in YES space too: buying NO is selling YES at (1 - price)
+        fv = est.last_fv if est.last_fv is not None else (fill.price if is_yes else 1.0 - fill.price)
+        side_yes = fill.side if is_yes else fill.side.opposite
+        est.markout.record_fill(side_yes, fv, fill.ts)
+        pos = self.state.position(fill.token_id)
+        if pos.size >= meta.min_order_size:
+            self._pos_open_ts.setdefault(fill.token_id, fill.ts)
+        else:
+            self._pos_open_ts.pop(fill.token_id, None)
 
     # ── quoter ──────────────────────────────────────────────────────────
     async def _quoter(self, cid: str) -> None:
@@ -347,6 +441,11 @@ class Engine:
             cd = rm.cooloff_remaining(now)
             if cd > 0:
                 wake = min(wake, cd + 0.5)  # re-enter right when cool-off ends
+        p = self.profiles.get(cid)
+        if p is not None:  # wake exactly on the next catalyst boundary (pull / re-enter)
+            cs = catalyst_state(self.catalysts.get(cid, ()), now, p.catalyst_flatten_hours)
+            if cs.next_change_s < wake:
+                wake = cs.next_change_s + 0.5
         meta = self.metas.get(cid)
         if meta is not None:  # holding inventory -> tick faster to manage exits
             held = self.state.position(meta.yes.token_id).size + self.state.position(meta.no.token_id).size
@@ -389,9 +488,35 @@ class Engine:
 
         pos_yes = self.state.position(meta.yes.token_id)
         pos_no = self.state.position(meta.no.token_id)
-        q_max = p.q_max_usdc
-        inv_util = abs(pos_yes.size - pos_no.size) * fv / q_max if q_max > 0 else 0.0
+        inv_util = abs(inventory_util(pos_yes.size - pos_no.size, fv, p.q_max_usdc, p.inventory_metric))
+        # exit urgency ramps with hold time; positions loaded at startup start the clock now
+        for tok, pos in ((meta.yes.token_id, pos_yes), (meta.no.token_id, pos_no)):
+            if pos.size >= meta.min_order_size:
+                self._pos_open_ts.setdefault(tok, now)
+            else:
+                self._pos_open_ts.pop(tok, None)
+
+        def urgency(tok: str) -> float:
+            if p.exit_urgency_s <= 0 or tok not in self._pos_open_ts:
+                return 0.0
+            return min(1.0, max(0.0, (now - self._pos_open_ts[tok]) / p.exit_urgency_s))
+
+        trade_out_allowed = all(
+            now - self._last_trade_out.get(tok, 0.0) >= p.trade_out_cooldown_s
+            for tok in (meta.yes.token_id, meta.no.token_id)
+        )
         hours_to_end = _hours_to_end(meta.end_date_iso, now)
+        cs = catalyst_state(self.catalysts.get(cid, ()), now, p.catalyst_flatten_hours)
+        if self._catalyst_last.get(cid) != (cs.active, cs.flatten):
+            self._catalyst_last[cid] = (cs.active, cs.flatten)
+            log.warning("catalyst_window", cid=cid[:8], active=cs.active, flatten=cs.flatten,
+                        note=cs.note, next_change_s=round(cs.next_change_s, 1))
+            if cs.active or cs.flatten:
+                self.alerter.alert(
+                    f"catalyst:{cid[:8]}",
+                    f"{meta.question[:40]} catalyst {'window' if cs.active else 'flatten lead-in'}"
+                    f"{': ' + cs.note if cs.note else ''}",
+                )
 
         # ── blind/stale conditions ──────────────────────────────────────────
         # A QUIET market with a live WS link is NOT stale — the CLOB WS pings
@@ -440,6 +565,7 @@ class Engine:
                 vol_ratio=est.vol.ratio, flow_z=est.flow.z, inventory_util=inv_util,
                 hours_to_end=hours_to_end, sweep_flagged=self._sweep.pop(cid, False),
                 ws_stale=ws_stale, risk_halt=rd.halt, risk_reduce_only=rd.reduce_only,
+                catalyst_active=cs.active, catalyst_flatten=cs.flatten,
             ),
             p,
         )
@@ -450,11 +576,22 @@ class Engine:
             no_view=(no_book.view() if no_book else _empty_view()),
             pos_yes=pos_yes, pos_no=pos_no, profile=p, now=now,
             risk_size_scale=rd.size_scale,
+            yes_exit_urgency=urgency(meta.yes.token_id), no_exit_urgency=urgency(meta.no.token_id),
+            trade_out_allowed=trade_out_allowed,
         ))
+
+        if tq.trade_outs:
+            # bounded taker exit: fire it, then requote on the next wake once the
+            # fill has landed (placing a SELL sized to the old position would be
+            # rejected for insufficient balance -> quarantine churn)
+            await self._execute_trade_outs(cid, meta, tq, now)
+            self._dirty[cid].set()
+            return
 
         live = self.state.orders_for(meta.yes.token_id) + self.state.orders_for(meta.no.token_id)
         plan = reconcile(tq, live, tick=meta.tick_size,
-                         reprice_ticks=p.reprice_ticks, resize_frac=p.resize_frac)
+                         reprice_ticks=p.reprice_ticks, resize_frac=p.resize_frac,
+                         min_live_size=meta.rewards_min_size if p.replace_below_reward_min else 0.0)
         if plan.is_noop:
             self._maybe_merge(cid, meta, p, pos_yes.size, pos_no.size)
             return
@@ -484,22 +621,59 @@ class Engine:
                 log.warning("shed_load", cid=cid[:8], pressure=round(self.gateway.order_pressure, 2))
                 self._dirty[cid].set()  # retry soon
             else:
-                placed = await self.gateway.place(plan.to_place, meta)
+                to_place = self._fundable(plan.to_place, cid)
+                placed = await self.gateway.place(to_place, meta) if to_place else []
                 placed_n = len(placed)
-                self.risk.note_order_result(len(placed) == len(plan.to_place))
+                if to_place:
+                    self.risk.note_order_result(len(placed) == len(to_place))
                 for o in placed:
                     self.state.upsert_order(o)
-                if len(placed) < len(plan.to_place):
+                if len(placed) < len(to_place):
                     # QUARANTINE: a failed/partial batch may still have posted
                     # orders we don't have ids for. Cancel everything on these
                     # tokens (idempotent) and resync — never risk an untracked order.
                     await self._quarantine(meta, reason="place_incomplete")
-        self._last_quote_fv[cid] = fv
+        self.journal.write("cycle", {
+            "cid": cid, "regime": regime.value, "fv": fv, "place": placed_n,
+            "cancel": len(plan.to_cancel), "pos_yes": pos_yes.size, "pos_no": pos_no.size,
+            "tox": est.markout.toxicity, "vol_short": est.vol.short, "flow_z": est.flow.z,
+            "inv_util": inv_util, "risk": rd.reason, "risk_halt": rd.halt,
+            "risk_reduce_only": rd.reduce_only, "size_scale": rd.size_scale,
+            "collateral": self._collateral, "equity": self._real_equity(),
+        }, now)
         log.info("requote", cid=cid[:8], regime=regime.value, fv=round(fv, 4),
                  place=placed_n, cancel=len(plan.to_cancel),
                  pos_yes=round(pos_yes.size, 1), pos_no=round(pos_no.size, 1),
                  tox=round(est.markout.toxicity, 3), flowz=round(est.flow.z, 2))
         self._maybe_merge(cid, meta, p, pos_yes.size, pos_no.size)
+
+    async def _execute_trade_outs(self, cid: str, meta: MarketMeta, tq: Any, now: float) -> None:
+        """Send each bounded taker exit as a FAK sell with a worst price. Marks
+        the cooldown whether or not it filled (a no-fill means the bid moved;
+        retrying every tick is exactly the panic-dump we are avoiding)."""
+        for t in tq.trade_outs:
+            self._last_trade_out[t.token_id] = now
+            held = self.state.position(t.token_id).size
+            size = min(t.size, held)
+            if size < meta.min_order_size:
+                continue
+            log.warning("trade_out", cid=cid[:8], token=t.token_id[:12], size=size,
+                        worst=t.worst_price, reason=t.reason, paper=self.paper)
+            self.alerter.alert(f"trade_out:{cid[:8]}",
+                               f"{meta.question[:40]} taker exit {size:.0f} sh @>= {t.worst_price} ({t.reason})")
+            if self.paper:
+                continue
+            # pull the resting exit on this token first so the FAK can't trip a
+            # balance check against shares already committed to it
+            with contextlib.suppress(Exception):
+                await self.gateway.cancel_asset(t.token_id)
+            for o in self.state.orders_for(t.token_id):
+                self.state.remove_order(o.order_id)
+            resp = await self.gateway.market_order(t.token_id, Side.SELL, size, meta,
+                                                   fak=True, worst_price=t.worst_price)
+            if str(resp.get("status", "")).lower() == "failed" or resp.get("error"):
+                log.error("trade_out_failed", cid=cid[:8], resp=str(resp)[:160])
+            self._reconcile_now.set()  # our taker fill lands via the user WS; resync regardless
 
     async def _quarantine(self, meta: MarketMeta, reason: str) -> None:
         """Cancel all orders on a market's tokens and resync state from REST."""
@@ -591,6 +765,7 @@ class Engine:
                 positions = self._only_traded(await self.gateway.positions())
                 if positions:
                     self.state.reconcile_positions(positions)
+                await self._refresh_collateral()
                 live = await self.gateway.open_orders()
                 by_token: dict[str, list[Any]] = {}
                 for o in live:
@@ -619,6 +794,12 @@ class Engine:
                     await self._check_position_divergence()
             self.state.record_pnl(self.risk.equity, self.risk.net_cash,
                                   self.risk.inventory_value, self.risk.daily_pnl)
+            self.journal.write("pnl", {
+                "equity": self.risk.equity, "net_cash": self.risk.net_cash,
+                "inventory_value": self.risk.inventory_value, "daily_pnl": self.risk.daily_pnl,
+                "collateral": self._collateral, "real_equity": self._real_equity(),
+                "halt": self.risk.global_halt()[1],
+            }, time.time())
             if rounds % 20 == 0:
                 self.state.checkpoint_wal()
 

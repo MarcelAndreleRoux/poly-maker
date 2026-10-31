@@ -1,4 +1,5 @@
-"""The scanner: sweep Gamma for political markets, score, persist to SQLite.
+"""The scanner: sweep Gamma for the markets under one tag (politics by default),
+score, persist to SQLite.
 
 Replaces the v1 data_updater (hour-long crawl of every order book, written to
 Google Sheets). A politics-filtered sweep here is seconds and one process.
